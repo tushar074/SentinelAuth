@@ -1,49 +1,194 @@
 version: '3.8'
 
 services:
+  # PostgreSQL 15 Database Service
   postgres:
-    image: postgres:15
-    container_name: sentinelauth_postgres
+    image: postgres:15-alpine
+    container_name: sentinelauth-postgres
     environment:
-      POSTGRES_USER: sentinelauth
-      POSTGRES_PASSWORD: sentinelauth_password
       POSTGRES_DB: sentinelauth_db
+      POSTGRES_USER: sentinelauth_user
+      POSTGRES_PASSWORD: sentinelauth_secure_password_123
+      POSTGRES_INITDB_ARGS: "-c log_statement=all -c log_duration=on"
     ports:
       - "5432:5432"
     volumes:
+      # Volume mounts for SQL initialization scripts
+      - ./src/main/resources/db/migration/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./src/main/resources/db/migration/data.sql:/docker-entrypoint-initdb.d/02-data.sql
+      # Named volume for persistent data storage
       - postgres_data:/var/lib/postgresql/data
+      # Logging configuration
+      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "work_mem=10MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "log_statement=all"
+      - "-c"
+      - "log_duration=on"
+      - "-c"
+      - "log_lock_waits=on"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sentinelauth"]
+      test: ["CMD-SHELL", "pg_isready -U sentinelauth_user -d sentinelauth_db"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
     networks:
-      - sentinelauth_network
+      - sentinelauth-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=postgres"
 
-  sentinelauth:
+  # Spring Boot Application Service
+  sentinelauth-app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: sentinelauth_app
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/sentinelauth_db
-      SPRING_DATASOURCE_USERNAME: sentinelauth
-      SPRING_DATASOURCE_PASSWORD: sentinelauth_password
-      SPRING_JPA_HIBERNATE_DDL_AUTO: update
-      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
-      SPRING_PROFILES_ACTIVE: dev
-    ports:
-      - "8080:8080"
+    container_name: sentinelauth-app
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - sentinelauth_network
+    environment:
+      # Spring Configuration
+      SPRING_APPLICATION_NAME: SentinelAuth
+      SPRING_PROFILES_ACTIVE: docker
+      SERVER_PORT: 8080
+      
+      # Database Configuration
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/sentinelauth_db
+      SPRING_DATASOURCE_USERNAME: sentinelauth_user
+      SPRING_DATASOURCE_PASSWORD: sentinelauth_secure_password_123
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      
+      # HikariCP Connection Pool Settings
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 20
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 5
+      SPRING_DATASOURCE_HIKARI_CONNECTION_TIMEOUT: 30000
+      SPRING_DATASOURCE_HIKARI_IDLE_TIMEOUT: 600000
+      SPRING_DATASOURCE_HIKARI_MAX_LIFETIME: 1800000
+      SPRING_DATASOURCE_HIKARI_AUTO_COMMIT: true
+      SPRING_DATASOURCE_HIKARI_LEAK_DETECTION_THRESHOLD: 60000
+      
+      # JPA/Hibernate Configuration
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQL15Dialect
+      SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+      SPRING_JPA_SHOW_SQL: "false"
+      SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL: "true"
+      SPRING_JPA_PROPERTIES_HIBERNATE_USE_SQL_COMMENTS: "true"
+      SPRING_JPA_PROPERTIES_HIBERNATE_JDBC_FETCH_SIZE: 50
+      SPRING_JPA_PROPERTIES_HIBERNATE_JDBC_BATCH_SIZE: 20
+      SPRING_JPA_PROPERTIES_HIBERNATE_JDBC_BATCH_VERSIONED_DATA: "true"
+      
+      # Logging Configuration
+      LOGGING_LEVEL_ROOT: INFO
+      LOGGING_LEVEL_COM_EXAMPLE_SENTINELAUTH: DEBUG
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: DEBUG
+      LOGGING_LEVEL_ORG_HIBERNATE: WARN
+      LOGGING_LEVEL_ORG_HIBERNATE_SQL: DEBUG
+      LOGGING_LEVEL_ORG_HIBERNATE_TYPE_DESCRIPTOR_SQL_BASICBINDER: TRACE
+      LOGGING_PATTERN_CONSOLE: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+      LOGGING_PATTERN_FILE: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+      LOGGING_FILE_NAME: /app/logs/sentinelauth.log
+      LOGGING_FILE_MAX_SIZE: 10MB
+      LOGGING_FILE_MAX_HISTORY: 30
+      
+      # Jackson Configuration
+      SPRING_JACKSON_SERIALIZATION_WRITE_DATES_AS_TIMESTAMPS: "false"
+      SPRING_JACKSON_TIME_ZONE: UTC
+      
+      # Server Configuration
+      SERVER_SERVLET_CONTEXT_PATH: /api
+      SERVER_COMPRESSION_ENABLED: "true"
+      SERVER_COMPRESSION_MIME_TYPES: application/json,application/xml,text/html,text/xml,text/plain
+      
+      # Connection Timeout and Keepalive
+      SERVER_TOMCAT_ACCEPT_COUNT: 100
+      SERVER_TOMCAT_MAX_CONNECTIONS: 200
+      SERVER_TOMCAT_THREADS_MAX: 200
+      SERVER_TOMCAT_THREADS_MIN_SPARE: 10
+    ports:
+      - "8080:8080"
+    volumes:
+      # Volume for application logs
+      - sentinelauth_logs:/app/logs
+      # Volume for application data
+      - sentinelauth_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
+    networks:
+      - sentinelauth-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        labels: "service=sentinelauth-app"
+
+  # Optional: pgAdmin for PostgreSQL Management UI
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sentinelauth-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@sentinelauth.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_ENHANCED_LOG_LEVEL: DEBUG
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - sentinelauth-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=pgadmin"
 
 volumes:
   postgres_data:
+    driver: local
+  sentinelauth_logs:
+    driver: local
+  sentinelauth_data:
+    driver: local
+  pgadmin_data:
+    driver: local
 
 networks:
-  sentinelauth_network:
+  sentinelauth-network:
     driver: bridge
